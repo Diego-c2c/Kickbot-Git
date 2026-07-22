@@ -1,0 +1,17 @@
+{
+  "name": "discord-paid-kick-bot",
+  "version": "1.0.0",
+  "description": "Discord.js v14 bot with paid kick credits",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.5",
+    "node-cron": "^4.6.0"
+  }
+}
