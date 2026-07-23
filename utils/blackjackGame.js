@@ -4,14 +4,32 @@ const {
   ButtonStyle,
 } = require('discord.js');
 
-const JOIN_WINDOW_MS = 8000;
-const PLAYER_ACTION_MS = 15000;
-const DEALER_HIT_UNTIL = 16;
-const NORMAL_PAYOUT_MULTIPLIER = 2;
-const BLACKJACK_PAYOUT_MULTIPLIER = 2.5;
+/*
+|--------------------------------------------------------------------------
+| Réglages généraux du blackjack
+|--------------------------------------------------------------------------
+*/
+const JOIN_WINDOW_MS = 8000; // délai d'inscription après la première mise
+const PLAYER_ACTION_MS = 15000; // temps max sans action avant stop auto
+const DEALER_HIT_UNTIL = 16; // la banque tire jusqu'à 16 inclus
+const NORMAL_PAYOUT_MULTIPLIER = 2; // victoire normale : 2:1
+const BLACKJACK_PAYOUT_MULTIPLIER = 2.5; // blackjack naturel : 2.5:1
 
+/*
+|--------------------------------------------------------------------------
+| Tables actives
+| Clé = channelId
+|--------------------------------------------------------------------------
+*/
 const activeTables = new Map();
 
+/*
+|--------------------------------------------------------------------------
+| Création et manipulation du deck
+|--------------------------------------------------------------------------
+*/
+
+// Crée un paquet de 52 cartes puis le mélange
 function createDeck() {
   const suits = ['♠', '♥', '♦', '♣'];
   const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
@@ -23,6 +41,7 @@ function createDeck() {
     }
   }
 
+  // Mélange Fisher-Yates
   for (let i = deck.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -31,14 +50,17 @@ function createDeck() {
   return deck;
 }
 
+// Pioche la carte du dessus
 function drawCard(deck) {
   return deck.pop();
 }
 
+// Formate une carte en texte, ex: A♠
 function cardLabel(card) {
   return `${card.rank}${card.suit}`;
 }
 
+// Affiche une main, avec possibilité de masquer la 2e carte (banque)
 function handToText(hand, hideSecondCard = false) {
   return hand
     .map((card, index) => {
@@ -48,12 +70,20 @@ function handToText(hand, hideSecondCard = false) {
     .join(' / ');
 }
 
+/*
+|--------------------------------------------------------------------------
+| Calcul de valeur des cartes / mains
+|--------------------------------------------------------------------------
+*/
+
+// Valeur brute d'une carte
 function getCardValue(card) {
   if (['J', 'Q', 'K'].includes(card.rank)) return 10;
   if (card.rank === 'A') return 11;
   return Number(card.rank);
 }
 
+// Valeur optimisée d'une main (As à 11 ou 1 selon besoin)
 function getHandValue(hand) {
   let total = 0;
   let aces = 0;
@@ -71,18 +101,33 @@ function getHandValue(hand) {
   return total;
 }
 
+// Blackjack naturel = 2 cartes seulement et total 21
 function isBlackjack(hand) {
   return hand.length === 2 && getHandValue(hand) === 21;
 }
 
+// Split possible uniquement si les 2 cartes ont le même rang
 function canSplit(hand) {
   return hand.length === 2 && hand[0].rank === hand[1].rank;
 }
 
+/*
+|--------------------------------------------------------------------------
+| Helpers joueurs / états
+|--------------------------------------------------------------------------
+*/
+
+// Retourne la main actuellement jouée du joueur
 function getActiveHand(player) {
   return player.hands[player.activeHandIndex];
 }
 
+// Indique si le joueur a fini toutes ses mains
+function isPlayerDone(player) {
+  return player.finished || player.activeHandIndex >= player.hands.length;
+}
+
+// Résumé d'un joueur pour affichage dans le message
 function buildPlayerSummary(player) {
   return player.hands
     .map((hand, index) => {
@@ -90,6 +135,7 @@ function buildPlayerSummary(player) {
         index === player.activeHandIndex && !player.finished ? '👉 ' : '';
       const total = ` (${getHandValue(hand.cards)})`;
       const status = hand.result ? ` — ${hand.result}` : '';
+
       return `${pointer}Main ${index + 1} • mise ${hand.bet} • ${handToText(
         hand.cards
       )}${total}${status}`;
@@ -97,6 +143,13 @@ function buildPlayerSummary(player) {
     .join('\n');
 }
 
+/*
+|--------------------------------------------------------------------------
+| Construction du message de table
+|--------------------------------------------------------------------------
+*/
+
+// Construit le texte complet affiché dans Discord
 function buildTableMessage(table, options = {}) {
   const { revealDealer = false, extra = '' } = options;
   const lines = [];
@@ -112,6 +165,7 @@ function buildTableMessage(table, options = {}) {
       0,
       Math.ceil((table.joinEndsAt - Date.now()) / 1000)
     );
+
     lines.push(
       `⏳ Inscriptions ouvertes pendant ${remaining} seconde(s). Rejoignez avec /bj <mise>.`
     );
@@ -132,118 +186,153 @@ function buildTableMessage(table, options = {}) {
     lines.push('');
   }
 
-  if (extra) lines.push(extra);
+  if (extra) {
+    lines.push(extra);
+  }
 
   return lines.join('\n').trim();
 }
 
-function buildActionRow(table) {
+/*
+|--------------------------------------------------------------------------
+| Boutons d'action
+|--------------------------------------------------------------------------
+*/
+
+// Construit une ligne de boutons par joueur encore actif
+// Limite Discord : 5 lignes max par message
+function buildActionRows(table) {
   if (table.phase !== 'playing') return [];
 
-  const player = table.players[table.currentPlayerIndex];
-  if (!player || player.finished) return [];
+  const rows = [];
 
-  const hand = getActiveHand(player);
-  const splitAllowed = canSplit(hand.cards) && player.hands.length === 1;
+  for (const player of table.players) {
+    if (isPlayerDone(player)) continue;
 
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`bj_hit:${table.channelId}:${player.userId}`)
-        .setLabel('Carte')
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(`bj_stand:${table.channelId}:${player.userId}`)
-        .setLabel('Stop')
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(`bj_split:${table.channelId}:${player.userId}`)
-        .setLabel('Split')
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(!splitAllowed)
-    ),
-  ];
+    const hand = getActiveHand(player);
+    if (!hand) continue;
+
+    const splitAllowed = canSplit(hand.cards) && player.hands.length === 1;
+
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`bj_hit:${table.channelId}:${player.userId}`)
+          .setLabel(`Carte ${player.username}`)
+          .setStyle(ButtonStyle.Primary),
+
+        new ButtonBuilder()
+          .setCustomId(`bj_stand:${table.channelId}:${player.userId}`)
+          .setLabel(`Stop ${player.username}`)
+          .setStyle(ButtonStyle.Secondary),
+
+        new ButtonBuilder()
+          .setCustomId(`bj_split:${table.channelId}:${player.userId}`)
+          .setLabel(`Split ${player.username}`)
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!splitAllowed)
+      )
+    );
+  }
+
+  return rows.slice(0, 5);
 }
 
+// Mise à jour sécurisée du message de table
 async function safeEditTable(table, content, revealDealer = false) {
   try {
     await table.tableMessage.edit({
       content: buildTableMessage(table, { revealDealer, extra: content }),
-      components: buildActionRow(table),
+      components: buildActionRows(table),
     });
   } catch (error) {
     console.error('Erreur update blackjack:', error);
   }
 }
 
-function clearPlayerTimer(table) {
-  if (table.playerActionTimeout) {
-    clearTimeout(table.playerActionTimeout);
-    table.playerActionTimeout = null;
+/*
+|--------------------------------------------------------------------------
+| Gestion des timeouts par joueur
+|--------------------------------------------------------------------------
+*/
+
+// Supprime le timer du joueur si présent
+function clearPlayerTimer(player) {
+  if (player.actionTimeout) {
+    clearTimeout(player.actionTimeout);
+    player.actionTimeout = null;
   }
 }
 
-async function advanceTurn(table) {
-  clearPlayerTimer(table);
+// Programme le timeout d'un joueur : stop auto après 15 sec
+function schedulePlayerTimeout(table, player) {
+  clearPlayerTimer(player);
 
-  while (table.currentPlayerIndex < table.players.length) {
-    const player = table.players[table.currentPlayerIndex];
+  player.actionTimeout = setTimeout(async () => {
+    const liveTable = activeTables.get(table.channelId);
+    if (!liveTable) return;
 
-    while (player.activeHandIndex < player.hands.length) {
-      const hand = getActiveHand(player);
-      const value = getHandValue(hand.cards);
+    const livePlayer = liveTable.players.find((p) => p.userId === player.userId);
+    if (!livePlayer || isPlayerDone(livePlayer)) return;
 
-      if (hand.stood || hand.busted) {
-        player.activeHandIndex += 1;
-        continue;
-      }
+    const hand = getActiveHand(livePlayer);
+    if (!hand) return;
 
-      if (value > 21) {
-        hand.busted = true;
-        hand.result = 'Bust';
-        player.activeHandIndex += 1;
-        continue;
-      }
+    hand.stood = true;
+    hand.result = hand.result || 'Stop auto';
+    livePlayer.activeHandIndex += 1;
 
-      table.phase = 'playing';
-      table.currentPlayerId = player.userId;
-
-      await safeEditTable(
-        table,
-        `🎯 Tour de ${player.username} — main ${
-          player.activeHandIndex + 1
-        }. Action dans ${PLAYER_ACTION_MS / 1000} s.`
-      );
-
-      table.playerActionTimeout = setTimeout(async () => {
-        const liveTable = activeTables.get(table.channelId);
-        if (!liveTable) return;
-
-        const livePlayer = liveTable.players[liveTable.currentPlayerIndex];
-        if (!livePlayer) return;
-
-        const liveHand = getActiveHand(livePlayer);
-        liveHand.stood = true;
-        liveHand.result = liveHand.result || 'Stop auto';
-        livePlayer.activeHandIndex += 1;
-
-        await advanceTurn(liveTable);
-      }, PLAYER_ACTION_MS);
-
-      return;
+    if (livePlayer.activeHandIndex >= livePlayer.hands.length) {
+      livePlayer.finished = true;
     }
 
-    player.finished = true;
-    table.currentPlayerIndex += 1;
+    await checkRoundCompletion(
+      liveTable,
+      `⏱️ ${livePlayer.username} n'a pas joué à temps.`
+    );
+  }, PLAYER_ACTION_MS);
+}
+
+// Programme les timeouts de tous les joueurs encore actifs
+function scheduleAllPlayerTimeouts(table) {
+  for (const player of table.players) {
+    if (!isPlayerDone(player)) {
+      schedulePlayerTimeout(table, player);
+    }
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
+| Fin de tour / phase banque
+|--------------------------------------------------------------------------
+*/
+
+// Vérifie si tous les joueurs ont fini ; si oui, la banque joue
+async function checkRoundCompletion(table, extra = '') {
+  const everyoneDone = table.players.every((player) => isPlayerDone(player));
+
+  if (!everyoneDone) {
+    await safeEditTable(
+      table,
+      extra || '🃏 La manche continue.'
+    );
+    return;
   }
 
   await resolveDealer(table);
 }
 
+// La banque révèle sa carte, tire jusqu'à 16, puis on paie
 async function resolveDealer(table) {
   table.phase = 'dealer';
-  clearPlayerTimer(table);
 
+  // On nettoie tous les timers joueurs
+  for (const player of table.players) {
+    clearPlayerTimer(player);
+  }
+
+  // La banque tire jusqu'à 16 inclus
   while (getHandValue(table.dealerHand) <= DEALER_HIT_UNTIL) {
     table.dealerHand.push(drawCard(table.deck));
   }
@@ -256,19 +345,23 @@ async function resolveDealer(table) {
     for (const hand of player.hands) {
       const playerValue = getHandValue(hand.cards);
 
+      // Joueur déjà bust
       if (hand.busted) {
         hand.result = 'Perdu';
         results.push(`❌ ${player.username} perd ${hand.bet} crédit(s).`);
         continue;
       }
 
+      // Blackjack naturel du joueur (et pas de blackjack banque)
       if (isBlackjack(hand.cards) && !isBlackjack(table.dealerHand)) {
         const win = Math.round(hand.bet * BLACKJACK_PAYOUT_MULTIPLIER);
+
         await table.creditsService.incrementCredits(
           player.userId,
           hand.bet + win,
           player.userTag
         );
+
         hand.result = `Blackjack gagné +${win}`;
         results.push(
           `🖤 ${player.username} fait Blackjack et gagne ${win} crédit(s).`
@@ -276,33 +369,60 @@ async function resolveDealer(table) {
         continue;
       }
 
-      if (dealerBust || playerValue > dealerValue) {
+      // Si la banque bust, tous les joueurs encore vivants gagnent
+      if (dealerBust) {
         const win = hand.bet * NORMAL_PAYOUT_MULTIPLIER;
+
         await table.creditsService.incrementCredits(
           player.userId,
           hand.bet + win,
           player.userTag
         );
+
         hand.result = `Gagné +${win}`;
-        results.push(`✅ ${player.username} gagne ${win} crédit(s).`);
+        results.push(
+          `✅ ${player.username} gagne ${win} crédit(s) (banque bust).`
+        );
         continue;
       }
 
+      // Si le joueur bat la banque
+      if (playerValue > dealerValue) {
+        const win = hand.bet * NORMAL_PAYOUT_MULTIPLIER;
+
+        await table.creditsService.incrementCredits(
+          player.userId,
+          hand.bet + win,
+          player.userTag
+        );
+
+        hand.result = `Gagné +${win}`;
+        results.push(
+          `✅ ${player.username} bat la banque (${playerValue} > ${dealerValue}) et gagne ${win} crédit(s).`
+        );
+        continue;
+      }
+
+      // Egalité = push => on rend juste la mise
       if (playerValue === dealerValue) {
         await table.creditsService.incrementCredits(
           player.userId,
           hand.bet,
           player.userTag
         );
+
         hand.result = 'Push';
         results.push(
-          `➖ ${player.username} récupère sa mise (${hand.bet}).`
+          `➖ ${player.username} fait égalité avec la banque (${playerValue}), mise rendue (${hand.bet}).`
         );
         continue;
       }
 
+      // Sinon la banque bat le joueur
       hand.result = 'Perdu';
-      results.push(`❌ ${player.username} perd ${hand.bet} crédit(s).`);
+      results.push(
+        `❌ ${player.username} est battu par la banque (${playerValue} < ${dealerValue}) et perd ${hand.bet} crédit(s).`
+      );
     }
   }
 
@@ -318,6 +438,13 @@ async function resolveDealer(table) {
   );
 }
 
+/*
+|--------------------------------------------------------------------------
+| Démarrage de manche
+|--------------------------------------------------------------------------
+*/
+
+// Distribue 2 cartes à chaque joueur + 2 à la banque
 async function startRound(table) {
   table.phase = 'dealing';
 
@@ -329,32 +456,53 @@ async function startRound(table) {
   }
 
   table.phase = 'playing';
-  await safeEditTable(table, '🂡 Les cartes sont distribuées.');
-  await advanceTurn(table);
+
+  // Si un joueur a un blackjack naturel, on le marque fini directement
+  for (const player of table.players) {
+    const hand = getActiveHand(player);
+    if (hand && isBlackjack(hand.cards)) {
+      hand.result = 'Blackjack';
+      player.finished = true;
+      player.activeHandIndex = player.hands.length;
+    }
+  }
+
+  await safeEditTable(
+    table,
+    '🂡 Les cartes sont distribuées. Chaque joueur peut jouer sa main.'
+  );
+
+  scheduleAllPlayerTimeouts(table);
+  await checkRoundCompletion(table);
 }
 
+/*
+|--------------------------------------------------------------------------
+| Création / entrée dans une table
+|--------------------------------------------------------------------------
+*/
+
+// Lance une table ou rejoint une table déjà ouverte
 async function createOrJoinTable({ interaction, amount, creditsService }) {
   const channel = interaction.channel;
   const channelId = channel.id;
   let table = activeTables.get(channelId);
 
-  const player = await creditsService.findByDiscordId(
+  const playerAccount = await creditsService.findByDiscordId(
     interaction.user.id,
     interaction.user.tag
   );
 
-  if (player.credits < amount) {
+  if (playerAccount.credits < amount) {
     return {
       ok: false,
       message: `Tu n'as pas assez de crédits. Mise demandée : ${amount}.`,
     };
   }
 
+  // Création d'une nouvelle table
   if (!table) {
-    await creditsService.decrementCredits(
-      interaction.user.id,
-      amount
-    );
+    await creditsService.decrementCredits(interaction.user.id, amount);
 
     const starter = {
       userId: interaction.user.id,
@@ -371,6 +519,7 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
       ],
       activeHandIndex: 0,
       finished: false,
+      actionTimeout: null,
     };
 
     let tableMessage;
@@ -385,6 +534,7 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
         amount,
         interaction.user.tag
       );
+
       return {
         ok: false,
         message:
@@ -402,9 +552,6 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
       phase: 'joining',
       joinEndsAt: Date.now() + JOIN_WINDOW_MS,
       joinTimeout: null,
-      playerActionTimeout: null,
-      currentPlayerIndex: 0,
-      currentPlayerId: null,
       tableMessage,
       creditsService,
     };
@@ -428,6 +575,7 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
     };
   }
 
+  // Une table existe déjà mais n'accepte plus de joueurs
   if (table.phase !== 'joining') {
     return {
       ok: false,
@@ -435,6 +583,7 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
     };
   }
 
+  // Empêche le double join
   if (table.players.some((entry) => entry.userId === interaction.user.id)) {
     return {
       ok: false,
@@ -442,6 +591,7 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
     };
   }
 
+  // Débit de la mise pour le nouveau joueur
   await creditsService.decrementCredits(interaction.user.id, amount);
 
   table.players.push({
@@ -459,6 +609,7 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
     ],
     activeHandIndex: 0,
     finished: false,
+    actionTimeout: null,
   });
 
   await safeEditTable(
@@ -472,44 +623,70 @@ async function createOrJoinTable({ interaction, amount, creditsService }) {
   };
 }
 
+/*
+|--------------------------------------------------------------------------
+| Gestion des boutons Discord
+|--------------------------------------------------------------------------
+*/
+
+// Gère Carte / Stop / Split
 async function handleBlackjackButton(interaction) {
   if (!interaction.isButton()) return false;
   if (!interaction.customId.startsWith('bj_')) return false;
 
-  // Acquitte le clic immédiatement pour éviter "n'a pas répondu à temps"
+  // On confirme immédiatement le clic pour éviter "KickBot n'a pas répondu à temps"
   await interaction.deferUpdate();
 
-  const [action, channelId, playerId] = interaction.customId.split(':');
-  const table = activeTables.get(channelId);
+  const parts = interaction.customId.split(':');
+  const action = parts[0]; // bj_hit / bj_stand / bj_split
+  const channelId = parts[1];
+  const playerId = parts[2];
 
-  if (!table) {
-    // La table n'existe plus, mais l'interaction est déjà deferUpdate, donc rien à faire
-    return true;
-  }
+  const table = activeTables.get(channelId);
+  if (!table) return true;
 
   const player = table.players.find((p) => p.userId === playerId);
   if (!player) return true;
 
+  // Seul le joueur propriétaire des boutons peut jouer sa main
   if (interaction.user.id !== playerId) {
-    // Ce n'est pas le bon joueur, mais on a déjà deferUpdate, donc on ignore
+    return true;
+  }
+
+  if (isPlayerDone(player)) {
     return true;
   }
 
   const hand = getActiveHand(player);
   if (!hand) return true;
 
+  clearPlayerTimer(player);
+
+  /*
+  |--------------------------------------------------------------------------
+  | Action : CARTE
+  |--------------------------------------------------------------------------
+  */
   if (action === 'bj_hit') {
     hand.cards.push(drawCard(table.deck));
     const value = getHandValue(hand.cards);
 
+    // Si le joueur bust, on termine sa main
     if (value > 21) {
       hand.busted = true;
-      hand.result = 'Bust';
+      hand.result = `Bust (${value})`;
       player.activeHandIndex += 1;
+
       if (player.activeHandIndex >= player.hands.length) {
         player.finished = true;
       }
+
+      await checkRoundCompletion(table, `💥 ${player.username} bust à ${value}.`);
+      return true;
     }
+
+    // Sinon il peut encore jouer, on relance son timer
+    schedulePlayerTimeout(table, player);
 
     await safeEditTable(
       table,
@@ -519,6 +696,11 @@ async function handleBlackjackButton(interaction) {
     return true;
   }
 
+  /*
+  |--------------------------------------------------------------------------
+  | Action : STOP
+  |--------------------------------------------------------------------------
+  */
   if (action === 'bj_stand') {
     hand.stood = true;
     hand.result = 'Stop';
@@ -528,18 +710,69 @@ async function handleBlackjackButton(interaction) {
       player.finished = true;
     }
 
-    await safeEditTable(
-      table,
-      `✋ ${player.username} reste.`
-    );
-
-    // Ici tu peux ensuite vérifier si tous les joueurs ont fini et lancer la banque
+    await checkRoundCompletion(table, `✋ ${player.username} reste.`);
     return true;
   }
 
+  /*
+  |--------------------------------------------------------------------------
+  | Action : SPLIT
+  |--------------------------------------------------------------------------
+  */
   if (action === 'bj_split') {
-    // Tu gardes ta logique de split ici, mais toujours avec deferUpdate au début
-    // ...
+    // Split impossible
+    if (!canSplit(hand.cards) || player.hands.length > 1) {
+      schedulePlayerTimeout(table, player);
+      await safeEditTable(
+        table,
+        `⚠️ Split impossible pour ${player.username}.`
+      );
+      return true;
+    }
+
+    // Vérifie si le joueur a assez de crédits pour doubler sa mise
+    const balance = await table.creditsService.getBalance(
+      player.userId,
+      player.userTag
+    );
+
+    if (balance.credits < hand.bet) {
+      schedulePlayerTimeout(table, player);
+      await safeEditTable(
+        table,
+        `⚠️ ${player.username} n'a pas assez de crédits pour split.`
+      );
+      return true;
+    }
+
+    // Débite une deuxième mise
+    await table.creditsService.decrementCredits(player.userId, hand.bet);
+
+    // Sépare les deux cartes en deux mains
+    const movedCard = hand.cards.pop();
+
+    const secondHand = {
+      cards: [movedCard],
+      bet: hand.bet,
+      stood: false,
+      busted: false,
+      result: null,
+    };
+
+    // Donne une nouvelle carte à chaque main
+    hand.cards.push(drawCard(table.deck));
+    secondHand.cards.push(drawCard(table.deck));
+
+    player.hands.push(secondHand);
+
+    // Le joueur continue de jouer sa main active
+    schedulePlayerTimeout(table, player);
+
+    await safeEditTable(
+      table,
+      `✂️ ${player.username} split sa main.`
+    );
+
     return true;
   }
 
