@@ -19,19 +19,19 @@ module.exports = {
   async execute(interaction) {
     const amount = interaction.options.getInteger('amount');
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     if (!USER_ROLE_ID) {
-      return interaction.reply({
+      return interaction.editReply({
         content: 'USER_ROLE_ID est manquant dans le fichier .env.',
-        flags: MessageFlags.Ephemeral,
       });
     }
 
     const minimumRole = interaction.guild.roles.cache.get(USER_ROLE_ID);
 
     if (!minimumRole) {
-      return interaction.reply({
+      return interaction.editReply({
         content: 'Le rôle minimum autorisé est introuvable sur le serveur.',
-        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -40,10 +40,9 @@ module.exports = {
       memberHighestRole.comparePositionTo(minimumRole) >= 0;
 
     if (!hasEnoughRoleLevel) {
-      return interaction.reply({
+      return interaction.editReply({
         content:
           "Tu dois avoir au minimum le grade Agents Shlag's pour avoir et utiliser des crédits.",
-        flags: MessageFlags.Ephemeral,
       });
     }
 
@@ -53,9 +52,8 @@ module.exports = {
       creditsService,
     });
 
-    return interaction.reply({
+    return interaction.editReply({
       content: result.message,
-      flags: MessageFlags.Ephemeral,
     });
   },
 };
