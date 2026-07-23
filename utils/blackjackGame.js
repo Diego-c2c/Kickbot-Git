@@ -9,7 +9,7 @@ const {
 | Réglages généraux du blackjack
 |--------------------------------------------------------------------------
 */
-const JOIN_WINDOW_MS = 8000; // délai d'inscription après la première mise
+const JOIN_WINDOW_MS = 10000; // délai d'inscription après la première mise
 const PLAYER_ACTION_MS = 15000; // temps max sans action avant stop auto
 const DEALER_HIT_UNTIL = 16; // la banque tire jusqu'à 16 inclus
 const NORMAL_PAYOUT_MULTIPLIER = 2; // victoire normale : 2:1
