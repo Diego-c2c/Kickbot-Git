@@ -111,6 +111,15 @@ function canSplit(hand) {
   return hand.length === 2 && hand[0].rank === hand[1].rank;
 }
 
+// Double autorisé uniquement sur les 2 premières cartes
+// et seulement si le total fait 9, 10 ou 11
+function canDoubleDown(hand) {
+  if (hand.length !== 2) return false;
+
+  const total = getHandValue(hand);
+  return total === 9 || total === 10 || total === 11;
+}
+
 /*
 |--------------------------------------------------------------------------
 | Helpers joueurs / états
@@ -213,6 +222,7 @@ function buildActionRows(table) {
     if (!hand) continue;
 
     const splitAllowed = canSplit(hand.cards) && player.hands.length === 1;
+    const doubleAllowed = canDoubleDown(hand.cards);
 
     rows.push(
       new ActionRowBuilder().addComponents(
@@ -230,7 +240,13 @@ function buildActionRows(table) {
           .setCustomId(`bj_split:${table.channelId}:${player.userId}`)
           .setLabel(`Split ${player.username}`)
           .setStyle(ButtonStyle.Success)
-          .setDisabled(!splitAllowed)
+          .setDisabled(!splitAllowed),
+
+        new ButtonBuilder()
+          .setCustomId(`bj_double:${table.channelId}:${player.userId}`)
+          .setLabel(`x2 ${player.username}`)
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(!doubleAllowed)
       )
     );
   }
@@ -771,6 +787,71 @@ async function handleBlackjackButton(interaction) {
     await safeEditTable(
       table,
       `✂️ ${player.username} split sa main.`
+    );
+
+    return true;
+  }
+
+    /*
+  |--------------------------------------------------------------------------
+  | Action : DOUBLE DOWN (x2)
+  |--------------------------------------------------------------------------
+  */
+  if (action === 'bj_double') {
+    // Autorisé seulement sur les 2 premières cartes et total 9/10/11
+    if (!canDoubleDown(hand.cards)) {
+      schedulePlayerTimeout(table, player);
+      await safeEditTable(
+        table,
+        `⚠️ x2 impossible pour ${player.username}. Le double est autorisé seulement sur 9, 10 ou 11 avec les 2 premières cartes.`
+      );
+      return true;
+    }
+
+    // Vérifie que le joueur a assez de crédits pour doubler sa mise
+    const balance = await table.creditsService.getBalance(
+      player.userId,
+      player.userTag
+    );
+
+    if (balance.credits < hand.bet) {
+      schedulePlayerTimeout(table, player);
+      await safeEditTable(
+        table,
+        `⚠️ ${player.username} n'a pas assez de crédits pour doubler sa mise.`
+      );
+      return true;
+    }
+
+    // On débite une 2e mise identique
+    await table.creditsService.decrementCredits(player.userId, hand.bet);
+
+    // La mise de la main double
+    hand.bet += hand.bet;
+    hand.doubled = true;
+
+    // Le joueur reçoit exactement UNE seule carte
+    hand.cards.push(drawCard(table.deck));
+    const value = getHandValue(hand.cards);
+
+    // Après un double, la main se termine automatiquement
+    if (value > 21) {
+      hand.busted = true;
+      hand.result = `Double Bust (${value})`;
+    } else {
+      hand.stood = true;
+      hand.result = `Double (${value})`;
+    }
+
+    player.activeHandIndex += 1;
+
+    if (player.activeHandIndex >= player.hands.length) {
+      player.finished = true;
+    }
+
+    await checkRoundCompletion(
+      table,
+      `💥 ${player.username} double à x2, reçoit une seule carte et termine sa main.`
     );
 
     return true;
