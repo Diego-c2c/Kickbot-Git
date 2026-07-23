@@ -1,15 +1,18 @@
 const { MessageFlags } = require('discord.js');
+const { handleBlackjackButton } = require('../utils/blackjackGame');
 
 module.exports = {
   name: 'interactionCreate',
   async execute(interaction) {
-    // On ne traite que les slash commands
+    if (interaction.isButton()) {
+      const handled = await handleBlackjackButton(interaction);
+      if (handled) return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
-    // Récupère la commande depuis la collection stockée sur le client
     const command = interaction.client.commands.get(interaction.commandName);
 
-    // Si la commande n'existe pas, on arrête
     if (!command) return;
 
     try {
@@ -17,7 +20,6 @@ module.exports = {
     } catch (error) {
       console.error(error);
 
-      // Si une erreur survient après que l'interaction ait déjà eu une réponse
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp({
           content: "Une erreur est survenue pendant l'exécution de la commande.",
